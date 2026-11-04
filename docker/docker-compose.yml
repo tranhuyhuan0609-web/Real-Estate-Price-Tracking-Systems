@@ -81,7 +81,7 @@ services:
       - 127.0.0.1:${POSTGRES_HOST_PORT:-17103}:5432
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-huyhuan}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-Property_data}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -99,7 +99,7 @@ services:
       - 127.0.0.1:${MONGO_HOST_PORT:-17102}:27017
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-huyhuan}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
     volumes:
       - mongo_data:/data/db
     healthcheck:
