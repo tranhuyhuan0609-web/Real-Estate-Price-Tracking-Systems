@@ -1,0 +1,115 @@
+# Local infrastructure. Run from the repository root:
+#   docker compose --env-file .env -f docker/docker-compose.yml up -d
+# Every port is bound to 127.0.0.1: nothing is reachable from other machines.
+
+# Fixed project name: volume names derive from it (see docs/naming.md).
+name: real-estate-price-tracking-systems
+
+services:
+  kafka:
+    # KRaft mode: the broker is also its own controller, so no ZooKeeper container.
+    image: apache/kafka:3.7.0
+    restart: unless-stopped
+    hostname: kafka
+    ports:
+      - 127.0.0.1:${KAFKA_HOST_PORT:-17100}:9092
+    environment:
+      CLUSTER_ID: 1NQ5N8lISF25WqJ-VHXLsA
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # INTERNAL for containers on the compose network, EXTERNAL for tools on the host.
+      KAFKA_LISTENERS: INTERNAL://:19092,CONTROLLER://:9093,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:${KAFKA_HOST_PORT:-17100}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # Single broker: internal topics cannot be replicated (development only).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by kafka-setup, never by a typo in a producer.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  kafka-setup:
+    # One-shot job: create the pipeline topics once the broker is healthy, then exit.
+    image: apache/kafka:3.7.0
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_RAW_TOPIC: ${KAFKA_RAW_TOPIC:-Property_data.raw_events}
+      KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC:-Property_data.dlq_events}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic "$$KAFKA_RAW_TOPIC" --partitions 4 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic "$$KAFKA_DLQ_TOPIC" --partitions 2 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --list
+
+  kafka-ui:
+    # Browse topics, messages and consumer-group lag: http://localhost:17101
+    # No authentication - development only (never expose this port).
+    image: provectuslabs/kafka-ui:v0.7.2
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:${KAFKA_UI_HOST_PORT:-17101}:8080
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+
+  postgres:
+    # PostGIS rather than plain postgres: listing coordinates are stored as geometry.
+    image: postgis/postgis:16-3.4-alpine
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:${POSTGRES_HOST_PORT:-17103}:5432
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-huyhuan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-Property_data}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:${MONGO_HOST_PORT:-17102}:27017
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-huyhuan}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --eval 'db.adminCommand(\"ping\").ok' | grep -q 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  kafka_data:
+  postgres_data:
+  mongo_data:
