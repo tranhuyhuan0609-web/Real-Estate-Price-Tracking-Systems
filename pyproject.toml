@@ -1,0 +1,63 @@
+[project]
+name = "real-estate-price-tracking-systems"
+version = "0.1.0"
+description = "Event-driven real estate price tracker for Vietnamese listing sites (Kafka, PostgreSQL/PostGIS, MongoDB, Medallion architecture)"
+readme = "README.md"
+authors = [
+    { name = "huyhuan", email = "tranhuyhuan0609@gmail.com" }
+]
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "types-pyyaml>=6.0.12.20261103",
+]
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers -m 'not integration'"
+markers = ["integration: needs Docker (testcontainers); run with `make test-integration`"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "ASYNC"]
+ignore = ["E501"]  # line length is left to the formatter
+
+[tool.ruff.lint.isort]
+known-first-party = ["real_estate_price_tracking_systems", "tests"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.13"
+mypy_path = "src"
+packages = ["real_estate_price_tracking_systems"]
+strict = true
+warn_unused_configs = true
+
+[tool.coverage.run]
+source = ["src/real_estate_price_tracking_systems"]
+branch = true
