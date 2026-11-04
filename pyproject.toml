@@ -1,0 +1,28 @@
+[project]
+name = "real-estate-price-tracking-systems"
+version = "0.1.0"
+description = "Event-driven real estate price tracker for Vietnamese listing sites (Kafka, PostgreSQL/PostGIS, MongoDB, Medallion architecture)"
+readme = "README.md"
+authors = [
+    { name = "huyhuan", email = "tranhuyhuan0609@gmail.com" }
+]
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "types-pyyaml>=6.0.12.20261103",
+]
