@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, typecheck, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install (from uv.lock)
+        run: uv sync --frozen
+
+      - name: uv.lock is up to date
+        run: uv lock --check
+
+      - name: Ruff
+        run: |
+          uv run --frozen ruff check src tests
+          uv run --frozen ruff format --check src tests
+
+      - name: Mypy (strict)
+        run: uv run --frozen mypy
+
+      - name: Pytest
+        run: uv run --frozen pytest --cov --cov-report=term
