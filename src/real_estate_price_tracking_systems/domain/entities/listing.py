@@ -10,6 +10,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from real_estate_price_tracking_systems.domain.entities.advertiser import AdvertiserData
 from real_estate_price_tracking_systems.domain.entities.base import NonBlank
+from real_estate_price_tracking_systems.domain.value_objects.price import PriceStatus
+
+__all__ = [
+    "Category",
+    "ListingDetailsData",
+    "ListingStatus",
+    "ParsedListingItem",
+    "PriceStatus",  # re-exported: listings carry a price status
+    "PropertyType",
+    "RawEventMessage",
+]
 
 
 class Category(StrEnum):
@@ -32,14 +43,6 @@ class ListingStatus(StrEnum):
     ACTIVE = "active"
     EXPIRED = "expired"
     HIDDEN = "hidden"
-
-
-class PriceStatus(StrEnum):
-    INITIAL = "initial"
-    INCREASED = "increased"
-    DECREASED = "decreased"
-    UNCHANGED = "unchanged"
-    CONTACT = "contact"  # no price shown ("liên hệ")
 
 
 class ListingDetailsData(BaseModel):
