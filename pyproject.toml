@@ -10,9 +10,10 @@ requires-python = ">=3.13,<3.14"
 license = "MIT"
 dependencies = [
     "pydantic>=2.7",
+    "parsel>=1.9",           # CSS/XPath selectors of HTML sites
     "pydantic-settings>=2.3",
     "pyyaml>=6.0",
-    "tzdata>=2024.1",       # IANA zones for zoneinfo on Windows and slim images
+    "tzdata>=2024.1",        # IANA zones for zoneinfo on Windows and slim images
 ]
 
 [build-system]
