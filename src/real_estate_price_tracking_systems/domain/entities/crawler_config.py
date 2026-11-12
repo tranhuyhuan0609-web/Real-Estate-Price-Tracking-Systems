@@ -255,6 +255,12 @@ class CrawlerConfig(StrictBaseModel):
     """Validated configuration for one crawl source."""
 
     site_id: NonBlank
+    portal: str | None = Field(
+        default=None,
+        description="Portal whose listing-id space this feed crawls. Feeds of one portal "
+        "(e.g. mogi and mogi_apartment) share listing keys, so one ad seen by both is one "
+        "listing. Defaults to site_id.",
+    )
     name: NonBlank = Field(max_length=100)
     enabled: bool = True
     crawler_type: Literal["rest_api", "html"] = "rest_api"
@@ -286,13 +292,20 @@ class CrawlerConfig(StrictBaseModel):
         "Independent of source_timezone so moving the crawl schedule never shifts parsed dates.",
     )
 
-    @field_validator("site_id")
+    @field_validator("site_id", "portal")
     @classmethod
-    def _check_site_id(cls, value: str) -> str:
-        value = value.lower()
+    def _check_site_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().lower()
         if not SITE_ID_RE.fullmatch(value):
-            raise ValueError("site_id must be 1-20 characters of a-z, 0-9, '_' and '-'.")
+            raise ValueError("must be 1-20 characters of a-z, 0-9, '_' and '-'.")
         return value
+
+    @property
+    def portal_id(self) -> str:
+        """Prefix of listing keys and value of ``listings.source``."""
+        return self.portal or self.site_id
 
     @field_validator("schedule_times")
     @classmethod
