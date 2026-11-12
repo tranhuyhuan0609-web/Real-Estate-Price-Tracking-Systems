@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import string
+from datetime import UTC, datetime, time, timedelta
 from typing import Any, Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -276,7 +277,14 @@ class CrawlerConfig(StrictBaseModel):
     )
     parser_version: NonBlank = "2.0.0"
     proxy_settings: ProxySettings = Field(default_factory=ProxySettings)
-    source_timezone: str = Field(default="UTC", description="Timezone of schedule_times.")
+    source_timezone: str = Field(
+        default="UTC", description="Timezone of schedule_times (when the crawler runs)."
+    )
+    content_timezone: str = Field(
+        default="Asia/Ho_Chi_Minh",
+        description="Timezone of dates shown by the site (e.g. 'Ngày đăng 04/11/2026'). "
+        "Independent of source_timezone so moving the crawl schedule never shifts parsed dates.",
+    )
 
     @field_validator("site_id")
     @classmethod
@@ -299,7 +307,7 @@ class CrawlerConfig(StrictBaseModel):
             raise ValueError("Duplicate schedule_times are not allowed.")
         return sorted(normalized)
 
-    @field_validator("source_timezone")
+    @field_validator("source_timezone", "content_timezone")
     @classmethod
     def _check_timezone(cls, value: str) -> str:
         value = value.strip()
@@ -381,3 +389,25 @@ class CrawlerConfig(StrictBaseModel):
 
     def source_zoneinfo(self) -> ZoneInfo:
         return ZoneInfo(self.source_timezone)
+
+    def content_zoneinfo(self) -> ZoneInfo:
+        return ZoneInfo(self.content_timezone)
+
+    def latest_scheduled_slot(self, now: datetime) -> datetime | None:
+        """The most recent slot of ``schedule_times`` at or before ``now``, in UTC.
+
+        Slots are wall-clock times in ``source_timezone``; ``None`` when the site runs on
+        ``interval_seconds`` instead.
+        """
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware.")
+        if not self.schedule_times:
+            return None
+        tz = self.source_zoneinfo()
+        local_now = now.astimezone(tz)
+        slots = [
+            datetime.combine(day, time(int(text[:2]), int(text[3:])), tzinfo=tz)
+            for day in (local_now.date(), (local_now - timedelta(days=1)).date())
+            for text in self.schedule_times
+        ]
+        return max(s for s in slots if s <= local_now).astimezone(UTC)
