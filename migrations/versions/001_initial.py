@@ -7,7 +7,12 @@
   it has no foreign key to ``crawler_configs``.
 * ``listing_feeds``: which feeds have seen a listing, so lifecycle runs per feed while several
   feeds of one portal share a listing.
-* ``listing_price_history``: one row per observed price change (Gold).
+* ``listing_price_history``: one row per observed price change (Gold). Append-only, so it is
+  range-partitioned by month on ``recorded_at``: old months can be detached or dropped cheaply and
+  time-bounded queries only touch recent partitions. ``ensure_price_history_partitions(n)`` creates
+  the monthly partitions from the current month to ``n`` months ahead (the scheduler calls it at
+  startup and daily). Rows outside every monthly partition land in a DEFAULT partition; when a month
+  is created later its rows are moved out of DEFAULT first.
 
 CHECK constraints mirror the domain enums and ``crawler_config.ENUM_VALUES``.
 
@@ -165,7 +170,7 @@ CREATE INDEX idx_listing_feeds_site ON listing_feeds(site_id, listing_key);
 
 PRICE_HISTORY = """
 CREATE TABLE listing_price_history (
-    history_id BIGSERIAL PRIMARY KEY,
+    history_id BIGSERIAL,
     listing_key TEXT NOT NULL REFERENCES listings(listing_key) ON DELETE CASCADE,
     crawl_run_id TEXT REFERENCES crawl_runs(crawl_run_id) ON DELETE SET NULL,
     price_vnd NUMERIC(18, 0) NOT NULL,
@@ -174,6 +179,8 @@ CREATE TABLE listing_price_history (
     price_diff_percent NUMERIC(12, 2) NOT NULL DEFAULT 0,
     price_status VARCHAR(20) NOT NULL,
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- A partitioned table's primary key must include the partition key.
+    PRIMARY KEY (history_id, recorded_at),
     CONSTRAINT chk_history_price_positive CHECK (price_vnd > 0 AND (price_per_m2 IS NULL OR price_per_m2 > 0)),
     CONSTRAINT chk_history_status CHECK (price_status IN ('initial', 'increased', 'decreased')),
     CONSTRAINT chk_price_diff_logic CHECK (
@@ -181,9 +188,49 @@ CREATE TABLE listing_price_history (
         (price_status = 'increased' AND price_diff_vnd > 0) OR
         (price_status = 'decreased' AND price_diff_vnd < 0)
     )
-);
+) PARTITION BY RANGE (recorded_at);
+CREATE TABLE listing_price_history_default PARTITION OF listing_price_history DEFAULT;
 CREATE INDEX idx_price_history_listing_timeline ON listing_price_history(listing_key, recorded_at DESC);
 CREATE INDEX idx_price_history_recorded_at ON listing_price_history(recorded_at DESC);
+"""
+
+ENSURE_PARTITIONS_FN = r"""
+CREATE OR REPLACE FUNCTION ensure_price_history_partitions(months_ahead INT DEFAULT 2)
+RETURNS INT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    month_start DATE;
+    last_month DATE := (date_trunc('month', NOW()) + make_interval(months => months_ahead))::date;
+    part_name TEXT;
+    created INT := 0;
+BEGIN
+    -- Start at the oldest month that has data in DEFAULT (if any), else the current month.
+    SELECT LEAST(
+        date_trunc('month', NOW())::date,
+        COALESCE((SELECT date_trunc('month', MIN(recorded_at))::date FROM listing_price_history_default),
+                 date_trunc('month', NOW())::date)
+    ) INTO month_start;
+
+    WHILE month_start <= last_month LOOP
+        part_name := format('listing_price_history_y%sm%s',
+                            to_char(month_start, 'YYYY'), to_char(month_start, 'MM'));
+        IF to_regclass(part_name) IS NULL THEN
+            EXECUTE format('CREATE TABLE %I (LIKE listing_price_history INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', part_name);
+            EXECUTE format(
+                'WITH moved AS (DELETE FROM listing_price_history_default
+                                 WHERE recorded_at >= %L AND recorded_at < %L RETURNING *)
+                 INSERT INTO %I SELECT * FROM moved',
+                month_start, (month_start + INTERVAL '1 month')::date, part_name);
+            EXECUTE format('ALTER TABLE listing_price_history ATTACH PARTITION %I FOR VALUES FROM (%L) TO (%L)',
+                           part_name, month_start, (month_start + INTERVAL '1 month')::date);
+            created := created + 1;
+        END IF;
+        month_start := (month_start + INTERVAL '1 month')::date;
+    END LOOP;
+    RETURN created;
+END;
+$$;
 """
 
 TABLES = ("listing_price_history", "listing_feeds", "listing_details", "listings", "advertisers", "crawl_runs", "crawler_configs")  # fmt: skip
@@ -193,8 +240,11 @@ def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
     for ddl in (CRAWLER_CONFIGS, CRAWL_RUNS, ADVERTISERS, LISTINGS, LISTING_DETAILS, LISTING_FEEDS, PRICE_HISTORY):  # fmt: skip
         op.execute(ddl)
+    op.execute(ENSURE_PARTITIONS_FN)
+    op.execute("SELECT ensure_price_history_partitions(2);")
 
 
 def downgrade() -> None:
+    op.execute("DROP FUNCTION IF EXISTS ensure_price_history_partitions(INT);")
     for table in TABLES:  # dependents first
         op.execute(f"DROP TABLE IF EXISTS {table};")
