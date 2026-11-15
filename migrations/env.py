@@ -23,7 +23,14 @@ def get_url() -> str:
 
 def run_migrations_offline() -> None:
     """``alembic upgrade head --sql``: print the SQL instead of connecting (renders init.sql)."""
-    context.configure(url=get_url(), target_metadata=target_metadata, literal_binds=True)
+    # paramstyle="named" stops the psycopg dialect doubling every "%" in the output, which would
+    # break format('%I') inside plpgsql bodies.
+    context.configure(
+        url=get_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
     with context.begin_transaction():
         context.run_migrations()
 
