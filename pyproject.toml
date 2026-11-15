@@ -9,8 +9,10 @@ authors = [
 requires-python = ">=3.13,<3.14"
 license = "MIT"
 dependencies = [
-    "pydantic>=2.7",
+    "alembic>=1.13",         # schema migrations (migrations/)
     "parsel>=1.9",           # CSS/XPath selectors of HTML sites
+    "psycopg[binary]>=3.2",  # PostgreSQL driver, also used by Alembic
+    "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "pyyaml>=6.0",
     "tzdata>=2024.1",        # IANA zones for zoneinfo on Windows and slim images

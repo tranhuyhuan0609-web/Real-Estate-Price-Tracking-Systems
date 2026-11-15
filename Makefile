@@ -1,9 +1,9 @@
 # Requires uv (https://docs.astral.sh/uv/). Run from the repository root.
 RUN := uv run --frozen
 COMPOSE := docker compose --env-file .env -f docker/docker-compose.yml
-SRC := src tests
+SRC := src tests migrations
 
-.PHONY: help install lock lint format typecheck test cov check clean up down ps logs
+.PHONY: help install lock lint format typecheck test cov check clean up down ps logs migrate
 
 help:
 	@echo "install    Create .venv from uv.lock"
@@ -18,6 +18,7 @@ help:
 	@echo "down       Stop the stack (data volumes are kept)"
 	@echo "ps         Show service status and health"
 	@echo "logs       Follow logs (make logs S=kafka for one service)"
+	@echo "migrate    Apply pending Alembic migrations to the database in .env"
 
 install:
 	uv sync --frozen
@@ -59,3 +60,6 @@ ps:
 
 logs:
 	$(COMPOSE) logs -f --tail=100 $(S)
+
+migrate:
+	$(RUN) alembic upgrade head
