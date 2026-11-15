@@ -1,15 +1,16 @@
 # Requires uv (https://docs.astral.sh/uv/). Run from the repository root.
 RUN := uv run --frozen
 COMPOSE := docker compose --env-file .env -f docker/docker-compose.yml
-SRC := src tests
+SRC := src tests migrations scripts
 
-.PHONY: help install lock lint format typecheck test cov check clean up down ps logs
+.PHONY: help install lock lint format typecheck test cov check clean up down ps logs migrate schema
 
 help:
 	@echo "install    Create .venv from uv.lock"
 	@echo "lock       Re-resolve dependencies into uv.lock"
 	@echo "lint       ruff check + ruff format --check"
 	@echo "format     Apply ruff fixes and formatting"
+	@echo "schema     Regenerate sql/init.sql from migrations/ (after adding a migration)"
 	@echo "typecheck  mypy (strict)"
 	@echo "test       Unit and contract tests"
 	@echo "cov        Tests with coverage report"
@@ -18,6 +19,7 @@ help:
 	@echo "down       Stop the stack (data volumes are kept)"
 	@echo "ps         Show service status and health"
 	@echo "logs       Follow logs (make logs S=kafka for one service)"
+	@echo "migrate    Apply pending Alembic migrations to the database in .env"
 
 install:
 	uv sync --frozen
@@ -59,3 +61,9 @@ ps:
 
 logs:
 	$(COMPOSE) logs -f --tail=100 $(S)
+
+migrate:
+	$(RUN) alembic upgrade head
+
+schema:
+	$(RUN) python scripts/generate_init_sql.py
