@@ -1,4 +1,4 @@
-"""Initial schema: Silver tables.
+"""Initial schema: Silver tables, price history and Gold views.
 
 * ``crawler_configs``: one row per feed, synced from ``configs/sites/*.yaml``.
 * ``crawl_runs``: one row per spider execution, at most one running per feed.
@@ -13,6 +13,8 @@
   the monthly partitions from the current month to ``n`` months ahead (the scheduler calls it at
   startup and daily). Rows outside every monthly partition land in a DEFAULT partition; when a month
   is created later its rows are moved out of DEFAULT first.
+* ``mv_ward_avg_price_per_m2`` and ``mv_steep_price_drops_7d``: Gold materialized views. Each has a
+  UNIQUE index, which ``REFRESH MATERIALIZED VIEW CONCURRENTLY`` requires so readers are not blocked.
 
 CHECK constraints mirror the domain enums and ``crawler_config.ENUM_VALUES``.
 
@@ -233,6 +235,62 @@ END;
 $$;
 """
 
+VIEWS = ("mv_steep_price_drops_7d", "mv_ward_avg_price_per_m2")  # dropped before the tables
+
+WARD_AVG_VIEW = """
+CREATE MATERIALIZED VIEW mv_ward_avg_price_per_m2 AS
+SELECT
+    d.city_name,
+    d.district_name,
+    COALESCE(d.ward_name, '') AS ward_name,
+    l.category,
+    l.property_type,
+    COUNT(l.listing_key) AS total_active_listings,
+    ROUND(AVG(l.current_price_per_m2), 0) AS avg_price_per_m2_vnd,
+    ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY l.current_price_per_m2)::NUMERIC, 0) AS median_price_per_m2_vnd,
+    ROUND(MIN(l.current_price_per_m2), 0) AS min_price_per_m2_vnd,
+    ROUND(MAX(l.current_price_per_m2), 0) AS max_price_per_m2_vnd,
+    NOW() AS refreshed_at
+FROM listings l
+JOIN listing_details d ON l.listing_key = d.listing_key
+WHERE l.status = 'active'
+  -- Drop obvious data-entry errors (a price per m2 outside 1M..2B VND) so they cannot skew averages.
+  AND l.current_price_per_m2 BETWEEN 1000000 AND 2000000000
+  AND d.city_name IS NOT NULL
+GROUP BY d.city_name, d.district_name, COALESCE(d.ward_name, ''), l.category, l.property_type;
+CREATE UNIQUE INDEX uq_mv_ward_avg_price
+    ON mv_ward_avg_price_per_m2(city_name, district_name, ward_name, category, property_type);
+"""
+
+STEEP_DROPS_VIEW = """
+CREATE MATERIALIZED VIEW mv_steep_price_drops_7d AS
+SELECT
+    h.history_id,
+    h.listing_key,
+    l.source,
+    d.title,
+    d.url,
+    d.city_name,
+    d.district_name,
+    d.ward_name,
+    l.area_m2,
+    h.price_vnd AS new_price_vnd,
+    (h.price_vnd - h.price_diff_vnd) AS old_price_vnd,
+    h.price_diff_vnd,
+    h.price_diff_percent,
+    h.recorded_at,
+    NOW() AS refreshed_at
+FROM listing_price_history h
+JOIN listings l ON h.listing_key = l.listing_key
+JOIN listing_details d ON h.listing_key = d.listing_key
+WHERE h.price_status = 'decreased'
+  AND h.price_diff_percent <= -5.0
+  AND h.recorded_at >= NOW() - INTERVAL '7 days'
+ORDER BY h.price_diff_percent ASC;
+CREATE UNIQUE INDEX uq_mv_steep_drops_history ON mv_steep_price_drops_7d(history_id);
+CREATE INDEX idx_mv_steep_drops_listing ON mv_steep_price_drops_7d(listing_key);
+"""
+
 TABLES = ("listing_price_history", "listing_feeds", "listing_details", "listings", "advertisers", "crawl_runs", "crawler_configs")  # fmt: skip
 
 
@@ -242,9 +300,13 @@ def upgrade() -> None:
         op.execute(ddl)
     op.execute(ENSURE_PARTITIONS_FN)
     op.execute("SELECT ensure_price_history_partitions(2);")
+    op.execute(WARD_AVG_VIEW)
+    op.execute(STEEP_DROPS_VIEW)
 
 
 def downgrade() -> None:
+    for view in VIEWS:
+        op.execute(f"DROP MATERIALIZED VIEW IF EXISTS {view};")
     op.execute("DROP FUNCTION IF EXISTS ensure_price_history_partitions(INT);")
     for table in TABLES:  # dependents first
         op.execute(f"DROP TABLE IF EXISTS {table};")
