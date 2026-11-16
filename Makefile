@@ -3,7 +3,7 @@ RUN := uv run --frozen
 COMPOSE := docker compose --env-file .env -f docker/docker-compose.yml
 SRC := src tests migrations scripts
 
-.PHONY: help install lock lint format typecheck test cov check clean up down ps logs migrate schema
+.PHONY: help install lock lint format typecheck test cov check clean up down ps logs migrate schema test-integration
 
 help:
 	@echo "install    Create .venv from uv.lock"
@@ -11,6 +11,7 @@ help:
 	@echo "lint       ruff check + ruff format --check"
 	@echo "format     Apply ruff fixes and formatting"
 	@echo "schema     Regenerate sql/init.sql from migrations/ (after adding a migration)"
+	@echo "test-integration  PostGIS + MongoDB in throwaway containers (needs Docker)"
 	@echo "typecheck  mypy (strict)"
 	@echo "test       Unit and contract tests"
 	@echo "cov        Tests with coverage report"
@@ -40,6 +41,9 @@ typecheck:
 
 test:
 	$(RUN) pytest
+
+test-integration:
+	$(RUN) pytest -m integration --no-cov
 
 cov:
 	$(RUN) pytest --cov --cov-report=term-missing
