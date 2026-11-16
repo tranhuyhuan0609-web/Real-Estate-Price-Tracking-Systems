@@ -36,3 +36,19 @@ jobs:
 
       - name: Pytest
         run: uv run --frozen pytest --cov --cov-report=term
+
+  integration:
+    name: Integration (PostGIS, MongoDB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install (from uv.lock)
+        run: uv sync --frozen
+
+      - name: Pytest (integration)
+        run: uv run --frozen pytest -m integration --no-cov
