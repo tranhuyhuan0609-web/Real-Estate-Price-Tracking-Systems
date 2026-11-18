@@ -11,6 +11,11 @@ from real_estate_price_tracking_systems.domain.entities import (
     ParsedListingItem,
     PropertyType,
 )
+from real_estate_price_tracking_systems.domain.location import parse_vietnamese_address
+from real_estate_price_tracking_systems.domain.location.administrative_data import (
+    KNOWN_HANOI_DISTRICT_NAMES,
+    KNOWN_HCM_DISTRICT_NAMES,
+)
 from real_estate_price_tracking_systems.domain.services import generate_fingerprint
 from real_estate_price_tracking_systems.domain.value_objects import build_listing_key
 from real_estate_price_tracking_systems.infrastructure.crawler.parsing.area import (
@@ -25,6 +30,9 @@ from real_estate_price_tracking_systems.infrastructure.crawler.parsing.html_clea
 )
 from real_estate_price_tracking_systems.infrastructure.crawler.parsing.json_path import (
     extract_by_json_path,
+)
+from real_estate_price_tracking_systems.infrastructure.crawler.parsing.legal_status import (
+    extract_legal_status,
 )
 from real_estate_price_tracking_systems.infrastructure.crawler.parsing.numbers import (
     safe_float,
@@ -97,6 +105,30 @@ def infer_property_type(text: str) -> PropertyType:
     return PropertyType.OTHER
 
 
+_CITY_URL_HINTS = (
+    (("ho-chi-minh", "tphcm", "tp-hcm"), "Thành phố Hồ Chí Minh"),
+    (("ha-noi", "hanoi"), "Thành phố Hà Nội"),
+    (("da-nang", "danang"), "Thành phố Đà Nẵng"),
+    (("binh-duong", "binhduong"), "Tỉnh Bình Dương"),
+    (("dong-nai", "dongnai"), "Tỉnh Đồng Nai"),
+)
+
+
+def infer_city(url: str, district_name: str | None) -> str | None:
+    """Last-resort city guess from URL slugs, then from well-known HCM / Hà Nội district names."""
+    url_lower = (url or "").lower()
+    for hints, city in _CITY_URL_HINTS:
+        if any(hint in url_lower for hint in hints):
+            return city
+    district = (district_name or "").lower()
+    if district:
+        if any(name in district for name in KNOWN_HCM_DISTRICT_NAMES):
+            return "Thành phố Hồ Chí Minh"
+        if any(name in district for name in KNOWN_HANOI_DISTRICT_NAMES):
+            return "Thành phố Hà Nội"
+    return None
+
+
 def infer_category(text: str) -> Category:
     """Infer transaction category (sale/rent/project) from title or URL slug if not mapped."""
     t = text.lower()
@@ -154,10 +186,19 @@ class ListingParser:
         facade_m, depth_m = self._dimensions(raw_item, text_context)
         category, property_type = self._classify(raw_item, title)
 
+        url = self._url(raw_item, external_id, external_code)
+        lat, lng = self._coordinates(raw_item)
+        address = self._address(raw_item, url)
         details = ListingDetailsData(
-            url=self._url(raw_item, external_id, external_code),
+            url=url,
             title=title,
             description=description_str,
+            city_name=address["city_name"],
+            district_name=address["district_name"],
+            ward_name=address["ward_name"],
+            lng=lng,
+            lat=lat,
+            legal_status=self._legal_status(raw_item, description_str),
             thumbnail_url=self._extract_val(raw_item, "thumbnail_url"),
             media_list=self._extract_val(raw_item, "media_list"),
         )
@@ -218,6 +259,48 @@ class ListingParser:
             facade = facade if facade is not None else facade_text
             depth = depth if depth is not None else depth_text
         return facade, depth
+
+    def _legal_status(self, raw_item: RawItem, description: str | None) -> str | None:
+        """The mapped legal status, else a keyword match in the description (max 50 chars)."""
+        raw = self._extract_val(raw_item, "legal_status")
+        if raw is not None and str(raw).strip():
+            status: str | None = self._map_enum_value("legal_status", raw, str(raw).strip())
+        else:
+            status = extract_legal_status(description)
+        return status[:50] if status else None
+
+    def _coordinates(self, raw_item: RawItem) -> tuple[float | None, float | None]:
+        """``(lat, lng)``, or ``(None, None)`` when the pair falls outside Vietnam."""
+        lat = safe_float(self._extract_val(raw_item, "lat"))
+        lng = safe_float(self._extract_val(raw_item, "lng"))
+        if (
+            lat is not None
+            and lng is not None
+            and not (8.0 <= lat <= 24.0 and 102.0 <= lng <= 110.5)
+        ):
+            return None, None  # a swapped or zeroed pair would put the listing in the sea
+        return lat, lng
+
+    def _address(self, raw_item: RawItem, url: str) -> dict[str, str | None]:
+        """Structured address from the raw address and the portal's own hints.
+
+        When no city comes out, it is guessed from the URL slug, then from well-known district
+        names (``infer_city``).
+        """
+
+        def hint(field: str) -> str | None:
+            value = self._extract_val(raw_item, field)
+            return str(value).strip() if value else None
+
+        parts = parse_vietnamese_address(
+            raw_address=hint("address"),
+            city_hint=hint("city_name"),
+            district_hint=hint("district_name"),
+            ward_hint=hint("ward_name"),
+        )
+        if not parts.get("city_name"):
+            parts["city_name"] = infer_city(url, parts.get("district_name"))
+        return parts
 
     def _map_enum_value(self, field_name: str, raw_value: Any, default: str) -> str:
         """Translate a source value through ``value_mappings`` (``_default`` is the catch-all)."""
