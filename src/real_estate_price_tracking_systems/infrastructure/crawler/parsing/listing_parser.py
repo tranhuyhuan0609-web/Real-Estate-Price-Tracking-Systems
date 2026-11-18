@@ -155,7 +155,7 @@ class ListingParser:
         category, property_type = self._classify(raw_item, title)
 
         details = ListingDetailsData(
-            url=self._url(raw_item),
+            url=self._url(raw_item, external_id, external_code),
             title=title,
             description=description_str,
             thumbnail_url=self._extract_val(raw_item, "thumbnail_url"),
@@ -264,9 +264,20 @@ class ListingParser:
             property_type = infer_property_type(hint)
         return category, property_type
 
-    def _url(self, raw_item: RawItem) -> str:
+    def _url(self, raw_item: RawItem, external_id: str | None, external_code: int | None) -> str:
+        """The item's own URL (made absolute), else ``url_template``, else empty.
+
+        An empty URL is rejected by ``ListingDetailsData``, so a feed that gives neither is
+        reported per item instead of storing a listing nobody can open.
+        """
         raw_url = self._text(raw_item, "url")
-        return urljoin(str(self.config.request.url), raw_url) if raw_url else ""
+        if raw_url:
+            return urljoin(str(self.config.request.url), raw_url)
+        if self.mapping.url_template and (external_id or external_code):
+            return self.mapping.url_template.format(
+                external_id=external_id or "", external_code=external_code or ""
+            )
+        return ""
 
 
 # ---------------------------------------------------------------------- helpers
