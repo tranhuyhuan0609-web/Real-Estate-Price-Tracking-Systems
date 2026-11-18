@@ -5,9 +5,11 @@ from typing import Any
 from urllib.parse import urljoin
 
 from real_estate_price_tracking_systems.domain.entities import (
+    Category,
     CrawlerConfig,
     ListingDetailsData,
     ParsedListingItem,
+    PropertyType,
 )
 from real_estate_price_tracking_systems.domain.services import generate_fingerprint
 from real_estate_price_tracking_systems.domain.value_objects import build_listing_key
@@ -33,6 +35,81 @@ from real_estate_price_tracking_systems.infrastructure.crawler.parsing.price imp
 )
 
 RawItem = dict[str, Any]
+
+
+def infer_property_type(text: str) -> PropertyType:
+    """Infer property type from listing title, breadcrumbs or URL slug if not explicitly mapped."""
+    t = text.lower()
+    if (
+        re.search(
+            r"\b(căn hộ|can ho|chung cư|chung cu|ccmn|chcc|penthouse|duplex|officetel|tập thể|tap the|[1-5]\s*pn|phòng ngủ)\b",
+            t,
+        )
+        or "-can-ho-" in t
+        or "-chung-cu-" in t
+        or "/can-ho-" in t
+        or "/chung-cu-" in t
+    ):
+        return PropertyType.APARTMENT
+    if (
+        re.search(r"\b(biệt thự|biet thu|villa|dinh thự|dinh thu)\b", t)
+        or "-biet-thu-" in t
+        or "-villa-" in t
+        or "/biet-thu-" in t
+    ):
+        return PropertyType.VILLA
+    if (
+        re.search(r"\b(shophouse|nhà phố thương mại|nha pho thuong mai)\b", t)
+        or "-shophouse-" in t
+        or "/shophouse-" in t
+    ):
+        return PropertyType.SHOPHOUSE
+    if (
+        re.search(
+            r"\b(kho|xưởng|nhà xưởng|văn phòng|van phong|mặt bằng|mat bang|khách sạn|hotel|resort|kios|ki-ốt|tmdv|thương mại dịch vụ|sàn chân đế)\b",
+            t,
+        )
+        or "-kho-" in t
+        or "-xuong-" in t
+        or "-van-phong-" in t
+        or "-mat-bang-" in t
+    ):
+        return PropertyType.COMMERCIAL
+    if (
+        re.search(
+            r"\b(đất|dat|đất nền|dat nen|thổ cư|tho cu|lô đất|lo dat|mảnh đất|thửa đất|lô góc|lo goc|vườn|sào|hecta|ha)\b",
+            t,
+        )
+        or "-dat-" in t
+        or "-dat-nen-" in t
+        or "/ban-dat" in t
+    ):
+        return PropertyType.LAND
+    if (
+        re.search(
+            r"\b(nhà|nha|nhà riêng|nha rieng|nhà phố|nha pho|nhà mặt tiền|nha mat tien|nhà hẻm|nha hem|nhà ngõ|nha ngo|nhà cấp 4|liền kề|lien ke|hxh|hxt|bán nr|\bnr\b|\d+\s*tầng)\b",
+            t,
+        )
+        or "-nha-" in t
+        or "/ban-nha" in t
+    ):
+        return PropertyType.HOUSE
+    return PropertyType.OTHER
+
+
+def infer_category(text: str) -> Category:
+    """Infer transaction category (sale/rent/project) from title or URL slug if not mapped."""
+    t = text.lower()
+    if (
+        re.search(r"\b(cho thuê|cho thue|thuê|thue)\b", t)
+        or "/cho-thue-" in t
+        or "/thue-" in t
+        or "-cho-thue-" in t
+    ):
+        return Category.RENT
+    if re.search(r"\b(dự án|du an)\b", t) or "/du-an-" in t or "-du-an-" in t:
+        return Category.PROJECT
+    return Category.SALE
 
 
 class ListingParser:
@@ -75,6 +152,7 @@ class ListingParser:
         area_m2 = parse_vietnamese_area(self._extract_val(raw_item, "area_m2"))
         price_vnd, price_per_m2 = self._price(raw_item, area_m2)
         facade_m, depth_m = self._dimensions(raw_item, text_context)
+        category, property_type = self._classify(raw_item, title)
 
         details = ListingDetailsData(
             url=self._url(raw_item),
@@ -95,6 +173,8 @@ class ListingParser:
                 district_name=details.district_name,
                 ward_name=details.ward_name,
             ),
+            category=category,
+            property_type=property_type,
             area_m2=area_m2,
             facade_m=facade_m,
             depth_m=depth_m,
@@ -138,6 +218,51 @@ class ListingParser:
             facade = facade if facade is not None else facade_text
             depth = depth if depth is not None else depth_text
         return facade, depth
+
+    def _map_enum_value(self, field_name: str, raw_value: Any, default: str) -> str:
+        """Translate a source value through ``value_mappings`` (``_default`` is the catch-all)."""
+        if raw_value is None:
+            return default
+        value = str(raw_value).strip()
+        mapping = self.mapping.value_mappings.get(field_name, {})
+        return mapping.get(value, mapping.get("_default", value))
+
+    def _classify(self, raw_item: RawItem, title: str) -> tuple[Category, PropertyType]:
+        """Category and property type: the mapped value when valid, else inferred from the text."""
+        hint = f"{title} {self._text(raw_item, 'breadcrumb')} {self._text(raw_item, 'url')}"
+
+        category: Category | None = None
+        raw_category = self._extract_val(raw_item, "category")
+        if raw_category is not None:
+            try:
+                category = Category(
+                    self._map_enum_value("category", raw_category, Category.SALE.value)
+                )
+            except ValueError:
+                category = None
+        if category is None:
+            category = infer_category(hint)
+        # A title that says "cho thuê" (and not "bán") is a rental whatever the source category says.
+        title_lower = title.lower()
+        if (
+            category == Category.SALE
+            and re.search(r"\b(cho thuê|cho thue)\b", title_lower)
+            and not re.search(r"\b(bán|ban)\b", title_lower)
+        ):
+            category = Category.RENT
+
+        property_type = PropertyType.OTHER
+        raw_type = self._extract_val(raw_item, "property_type")
+        if raw_type is not None:
+            try:
+                property_type = PropertyType(
+                    self._map_enum_value("property_type", raw_type, PropertyType.OTHER.value)
+                )
+            except ValueError:
+                property_type = PropertyType.OTHER
+        if property_type == PropertyType.OTHER:
+            property_type = infer_property_type(hint)
+        return category, property_type
 
     def _url(self, raw_item: RawItem) -> str:
         raw_url = self._text(raw_item, "url")
