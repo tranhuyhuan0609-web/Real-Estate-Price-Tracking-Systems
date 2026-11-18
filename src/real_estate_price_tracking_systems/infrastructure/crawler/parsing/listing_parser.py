@@ -1,10 +1,13 @@
 """Turn one raw API/HTML item into a :class:`ParsedListingItem` using ``response_mapping``."""
 
+import hashlib
 import re
 from typing import Any
 from urllib.parse import urljoin
 
 from real_estate_price_tracking_systems.domain.entities import (
+    AdvertiserData,
+    AdvertiserKind,
     Category,
     CrawlerConfig,
     ListingDetailsData,
@@ -26,7 +29,9 @@ from real_estate_price_tracking_systems.infrastructure.crawler.parsing.datetime_
     parse_vietnamese_datetime,
 )
 from real_estate_price_tracking_systems.infrastructure.crawler.parsing.html_cleaner import (
+    clean_email,
     clean_html,
+    extract_email_from_text,
 )
 from real_estate_price_tracking_systems.infrastructure.crawler.parsing.json_path import (
     extract_by_json_path,
@@ -37,6 +42,10 @@ from real_estate_price_tracking_systems.infrastructure.crawler.parsing.legal_sta
 from real_estate_price_tracking_systems.infrastructure.crawler.parsing.numbers import (
     safe_float,
     safe_int,
+)
+from real_estate_price_tracking_systems.infrastructure.crawler.parsing.phone import (
+    extract_phone_from_text,
+    parse_vietnamese_phone,
 )
 from real_estate_price_tracking_systems.infrastructure.crawler.parsing.price import (
     parse_vietnamese_price,
@@ -226,6 +235,7 @@ class ListingParser:
                 default_tz=self.config.content_zoneinfo(),
             ),
             details=details,
+            advertiser=self._advertiser(raw_item, text_context),
         )
 
     # ------------------------------------------------------------------ steps
@@ -259,6 +269,56 @@ class ListingParser:
             facade = facade if facade is not None else facade_text
             depth = depth if depth is not None else depth_text
         return facade, depth
+
+    def _advertiser(self, raw_item: RawItem, text_context: str) -> AdvertiserData:
+        """Seller contact. Mapped fields win; the title and description fill what is missing.
+
+        The id is stable across crawls: derived from the phone when there is one (the same seller
+        posts on several feeds), else the portal's id, else a hash of the name.
+        """
+        name = dedupe_repeated_name(self._extract_val(raw_item, "advertiser_name"))
+
+        try:
+            kind = AdvertiserKind(
+                self._map_enum_value(
+                    "advertiser_kind",
+                    self._extract_val(raw_item, "advertiser_kind"),
+                    AdvertiserKind.UNKNOWN.value,
+                )
+            )
+        except ValueError:
+            kind = AdvertiserKind.UNKNOWN
+
+        # The contact phone wins over aggregator account phones; fall back to the text.
+        phone = parse_vietnamese_phone(
+            self._extract_val(raw_item, "advertiser_phone")
+        ) or extract_phone_from_text(text_context)
+        email = (
+            clean_email(self._extract_val(raw_item, "advertiser_email"))
+            or extract_email_from_text(text_context)
+            or first_email_in_values(raw_item)
+        )
+
+        raw_id = self._extract_val(raw_item, "advertiser_id")
+        advertiser_id: str | None
+        if phone:
+            advertiser_id = f"adv_{self.config.portal_id}_{phone[:20]}"
+        elif raw_id:
+            advertiser_id = str(raw_id).strip()[:64]
+        elif name:
+            name_hash = hashlib.md5(name.lower().encode("utf-8"), usedforsecurity=False)
+            advertiser_id = f"adv_{self.config.portal_id}_{name_hash.hexdigest()[:12]}"
+        else:
+            advertiser_id = None
+
+        return AdvertiserData(
+            advertiser_id=advertiser_id,
+            name=name[:100] if name else None,
+            phone=phone[:20] if phone else None,
+            email=email[:100] if email else None,
+            kind=kind,
+            is_verified=parse_bool(self._extract_val(raw_item, "advertiser_is_verified")),
+        )
 
     def _legal_status(self, raw_item: RawItem, description: str | None) -> str | None:
         """The mapped legal status, else a keyword match in the description (max 50 chars)."""
@@ -383,3 +443,35 @@ def clean_external_id(external_id: str | None) -> str | None:
 
 def positive(value: float | None) -> float | None:
     return value if value is not None and value > 0 else None
+
+
+def dedupe_repeated_name(raw: Any) -> str | None:
+    """A name scraped twice from one node ("Nguyễn An Nguyễn An") is collapsed."""
+    if not raw or not str(raw).strip():
+        return None
+    name = str(raw).strip()
+    words = name.split()
+    half = len(words) // 2
+    if len(words) >= 2 and len(words) % 2 == 0 and words[:half] == words[half:]:
+        return " ".join(words[:half])
+    return name
+
+
+def parse_bool(raw: Any) -> bool:
+    if raw is None:
+        return False
+    if isinstance(raw, bool | int | float):
+        return bool(raw)
+    return str(raw).strip().lower() in ("true", "1", "yes")
+
+
+def first_email_in_values(raw_item: RawItem) -> str | None:
+    """Last resort: any value that cleans to an e-mail (avatar URL, Cloudflare hex, ...)."""
+    for key, value in raw_item.items():
+        if isinstance(value, str) and (
+            "@" in value or "cfemail" in key.lower() or len(value) >= 16
+        ):
+            email = clean_email(value)
+            if email:
+                return email
+    return None
