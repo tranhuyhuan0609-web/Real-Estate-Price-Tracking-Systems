@@ -1,4 +1,4 @@
-"""Generic HTML spider: pagination and CSS/XPath/embedded-JSON extraction via parsel."""
+"""Generic HTML spider: pagination, CSS/XPath/embedded-JSON extraction via parsel, detail pages."""
 
 import asyncio
 import json
@@ -51,8 +51,13 @@ class GenericHtmlSpider(Spider):
 
     How a crawl ended is reported like the API spider: ``aborted_reason`` for an error or a block
     (no usable response, an empty first page), ``exhausted`` only when a later page has no cards.
-    ``selector_errors`` and ``parse_errors`` count fields and items that failed without stopping
-    the crawl; ``retry_backoff_sec`` is the base of the linear retry backoff.
+    With ``detail_page.enabled`` each card's own page is fetched (concurrently, bounded by
+    ``concurrent_requests``) to fill what the list lacks, such as the phone, the date and the
+    media. A detail link outside the feed's allowed domains is never requested: list pages carry
+    ads that point to third-party sites. A detail page that fails leaves the list data in place.
+
+    ``selector_errors``, ``detail_errors`` and ``parse_errors`` count fields, detail pages and
+    items that failed without stopping the crawl; ``retry_backoff_sec`` is the base of the linear retry backoff.
     """
 
     def __init__(self, config: CrawlerConfig, retry_backoff_sec: float = 2.0) -> None:
@@ -61,11 +66,13 @@ class GenericHtmlSpider(Spider):
         self.req_cfg = config.request
         self.page_cfg = config.pagination
         self.rate_cfg = config.rate_limit
+        self.detail_cfg = config.detail_page
         self.retry_backoff_sec = retry_backoff_sec
         self.pages_crawled: int = 0
         self.aborted_reason: str | None = None
         self.exhausted: bool = False
         self.selector_errors: int = 0
+        self.detail_errors: int = 0
         self.parse_errors: int = 0
         self._clients: HttpClientPool | None = None
         self._warned_selectors: set[str] = set()  # log each broken selector once per crawl
@@ -192,6 +199,7 @@ class GenericHtmlSpider(Spider):
         """Crawl list pages up to the page budget and yield ``(item, raw field dict)``."""
         self.pages_crawled = 0
         self.selector_errors = 0
+        self.detail_errors = 0
         self.parse_errors = 0
         self.aborted_reason = None
         self.exhausted = False
@@ -204,6 +212,8 @@ class GenericHtmlSpider(Spider):
             run_mode,
             max_pages,
         )
+
+        detail_semaphore = asyncio.Semaphore(max(1, self.rate_cfg.concurrent_requests))
 
         async with HttpClientPool(
             self.config.proxy_settings, headers=self._headers(), follow_redirects=True
@@ -236,6 +246,10 @@ class GenericHtmlSpider(Spider):
                         self.exhausted = True
                     break
 
+                if self.detail_cfg.enabled:
+                    await asyncio.gather(
+                        *(self._enrich_from_detail(item, detail_semaphore) for item in raw_items)
+                    )
                 for raw_item in raw_items:
                     parsed = self._parse(raw_item)
                     if parsed is not None:
@@ -298,6 +312,46 @@ class GenericHtmlSpider(Spider):
     def _is_allowed_url(self, url: str) -> bool:
         host = urlsplit(url).hostname
         return not host or self.config.is_allowed_domain(host)
+
+    async def _enrich_from_detail(self, item: dict[str, Any], semaphore: asyncio.Semaphore) -> None:
+        """Fill ``item`` with the detail page's fields. Off-domain links are never fetched."""
+        detail_url = item.get(self.detail_cfg.url_field) or item.get("url")
+        if not detail_url or not self._is_allowed_url(detail_url):
+            return
+        async with semaphore:
+            try:
+                if self.rate_cfg.download_delay_sec > 0:
+                    await asyncio.sleep(self.rate_cfg.download_delay_sec)
+                response = await self._send_request(detail_url)
+            except httpx.HTTPError as exc:
+                self.detail_errors += 1
+                logger.warning(
+                    "Site '%s': detail page %s failed (%s: %s); phone, date and media may be missing.",
+                    self.config.site_id,
+                    detail_url,
+                    type(exc).__name__,
+                    exc,
+                )
+                return
+        if response is None:
+            self.detail_errors += 1
+            logger.warning(
+                "Site '%s': detail page %s returned no usable response.",
+                self.config.site_id,
+                detail_url,
+            )
+            return
+        page = Selector(text=response.text)
+        for field, path in self.detail_cfg.fields.items():
+            is_list = field == "media_list"
+            value = self._extract_selector_value(page, path, is_list=is_list)
+            if value is None:
+                continue
+            item[field] = (
+                [urljoin(detail_url, u) for u in value]
+                if is_list and isinstance(value, list)
+                else value
+            )
 
     def _parse(self, raw_item: dict[str, Any]) -> ParsedListingItem | None:
         try:
