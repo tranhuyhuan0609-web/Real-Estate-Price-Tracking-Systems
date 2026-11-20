@@ -5,6 +5,9 @@ from real_estate_price_tracking_systems.domain.entities import CrawlerConfig
 from real_estate_price_tracking_systems.infrastructure.crawler.spiders.generic_api_spider import (
     GenericApiSpider,
 )
+from real_estate_price_tracking_systems.infrastructure.crawler.spiders.generic_html_spider import (
+    GenericHtmlSpider,
+)
 
 
 def create_spider(config: CrawlerConfig) -> Spider:
@@ -15,6 +18,8 @@ def create_spider(config: CrawlerConfig) -> Spider:
     """
     if config.crawler_type == "rest_api":
         return GenericApiSpider(config)
+    if config.crawler_type == "html":
+        return GenericHtmlSpider(config)
     raise ValueError(
         f"No spider for crawler_type {config.crawler_type!r} (feed {config.site_id!r})"
     )

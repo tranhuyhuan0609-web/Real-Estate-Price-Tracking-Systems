@@ -6,14 +6,12 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
-import pytest
 
 from real_estate_price_tracking_systems.domain.entities import CrawlerConfig, RunMode
 from real_estate_price_tracking_systems.infrastructure.crawler.spiders.generic_api_spider import (
     GenericApiSpider,
 )
-
-Handler = Callable[[httpx.Request, str | None], httpx.Response]
+from tests.unit.spiders.conftest import Handler
 
 
 def base_data(**overrides: Any) -> dict[str, Any]:
@@ -62,33 +60,6 @@ def item(code: int, **extra: Any) -> dict[str, Any]:
 
 def page(*items: dict[str, Any]) -> httpx.Response:
     return httpx.Response(200, json={"data": list(items)})
-
-
-@pytest.fixture
-def requests_seen() -> list[tuple[httpx.Request, str | None]]:
-    return []
-
-
-@pytest.fixture
-def serve(
-    monkeypatch: pytest.MonkeyPatch, requests_seen: list[tuple[httpx.Request, str | None]]
-) -> Callable[[Handler], None]:
-    """Route every AsyncClient the pool builds through ``handler(request, proxy)``."""
-    real_client = httpx.AsyncClient
-
-    def install(handler: Handler) -> None:
-        def factory(**kwargs: Any) -> httpx.AsyncClient:
-            proxy = kwargs.pop("proxy", None)  # a real proxy would bypass the mock transport
-
-            def respond(request: httpx.Request) -> httpx.Response:
-                requests_seen.append((request, proxy))
-                return handler(request, proxy)
-
-            return real_client(transport=httpx.MockTransport(respond), **kwargs)
-
-        monkeypatch.setattr(httpx, "AsyncClient", factory)
-
-    return install
 
 
 def by_page(pages: list[httpx.Response]) -> Handler:
