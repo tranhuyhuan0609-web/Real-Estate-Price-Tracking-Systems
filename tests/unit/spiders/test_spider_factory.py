@@ -12,6 +12,6 @@ def test_rest_api_feeds_get_the_api_spider() -> None:
 
 
 def test_a_crawler_type_without_a_spider_fails_loudly() -> None:
-    config = make_config().model_copy(update={"crawler_type": "html"})
-    with pytest.raises(ValueError, match="No spider for crawler_type 'html'"):
+    config = make_config().model_copy(update={"crawler_type": "ftp"})
+    with pytest.raises(ValueError, match="No spider for crawler_type 'ftp'"):
         create_spider(config)
