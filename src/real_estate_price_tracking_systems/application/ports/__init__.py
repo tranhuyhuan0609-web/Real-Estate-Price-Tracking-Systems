@@ -11,6 +11,7 @@ from real_estate_price_tracking_systems.application.ports.listing_repository imp
     ListingObservation,
     ListingRepository,
 )
+from real_estate_price_tracking_systems.application.ports.spider import Spider
 
 __all__ = [
     "ConfigRepository",
@@ -18,4 +19,5 @@ __all__ = [
     "LifecycleRepository",
     "ListingObservation",
     "ListingRepository",
+    "Spider",
 ]
