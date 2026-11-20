@@ -32,6 +32,13 @@ DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RealEstateBot/1.
 class GenericApiSpider(Spider):
     """Config-driven asynchronous spider for REST API real estate sources.
 
+    How a crawl ended is reported in two attributes that the crawl use case reads:
+
+    * ``aborted_reason``: set when the crawl stopped because of an error or a block (no usable
+      response, invalid JSON, an empty first page, a missing items path).
+    * ``exhausted``: True only when a page after the first came back empty, i.e. the end of the
+      listings was really reached. Stopping at the page budget sets neither.
+
     ``retry_backoff_sec`` is the base of the linear backoff between retries (attempt n waits
     ``n * retry_backoff_sec``); tests pass a tiny value.
     """
@@ -113,6 +120,8 @@ class GenericApiSpider(Spider):
         """Crawl pages up to the page budget of ``run_mode`` and yield ``(item, raw payload)``."""
         self.pages_crawled = 0
         self.parse_errors = 0
+        self.aborted_reason = None
+        self.exhausted = False
         max_pages = self.config.max_pages(run_mode)
         logger.info(
             "Starting crawl for site '%s' (mode: %s, max_pages: %d)",
@@ -129,20 +138,28 @@ class GenericApiSpider(Spider):
             current_page = self.page_cfg.start_page
             while self.pages_crawled < max_pages:
                 params, body = self._page_request(current_page)
-                response = await self._send_request_with_retry(
-                    url=str(self.req_cfg.url),
-                    method=self.req_cfg.method,
-                    headers=headers,
-                    params=params,
-                    json_body=body,
-                )
+                try:
+                    response = await self._send_request_with_retry(
+                        url=str(self.req_cfg.url),
+                        method=self.req_cfg.method,
+                        headers=headers,
+                        params=params,
+                        json_body=body,
+                    )
+                except httpx.HTTPError as exc:
+                    self.aborted_reason = f"Network error at page {current_page}: {exc!r}"
+                    break
                 if response is None:
                     logger.warning("No usable response. Stopping crawl at page %d", current_page)
+                    self.aborted_reason = (
+                        f"No usable HTTP response at page {current_page} (blocked or server error)"
+                    )
                     break
                 try:
                     payload = response.json()
                 except ValueError as exc:
                     logger.error("Invalid JSON on page %d: %s", current_page, exc)
+                    self.aborted_reason = f"Invalid JSON response at page {current_page}: {exc}"
                     break
                 self.pages_crawled += 1
 
@@ -177,16 +194,25 @@ class GenericApiSpider(Spider):
         return params, body if self.req_cfg.method == "POST" else None
 
     def _page_items(self, payload: Any, page: int) -> list[Any] | None:
-        """Items of a page, or None to stop crawling."""
+        """Items of a page, or None to stop: end of listings (exhausted) or a broken page (aborted)."""
         stop_path = self.config.items_stop_path
         stop_items = extract_by_json_path(payload, stop_path)
         if not stop_items or not isinstance(stop_items, list):
             logger.info("No items at '%s' on page %d: end of listings.", stop_path, page)
+            if page == self.page_cfg.start_page:
+                # An empty first page is an API change or a block, not the end of the listings.
+                self.aborted_reason = (
+                    f"No items on first page (stop path '{stop_path}'); "
+                    "possible API change or bot block"
+                )
+            else:
+                self.exhausted = True
             return None
         items_path = self.config.response_mapping.items_path
         items = stop_items if items_path == stop_path else extract_by_json_path(payload, items_path)
         if not items or not isinstance(items, list):
             logger.error("Items path '%s' missing or not a list at page %d", items_path, page)
+            self.aborted_reason = f"Items path '{items_path}' missing or not a list at page {page}"
             return None
         return items
 
