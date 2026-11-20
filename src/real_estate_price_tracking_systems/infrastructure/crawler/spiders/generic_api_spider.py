@@ -25,7 +25,6 @@ from real_estate_price_tracking_systems.infrastructure.crawler.parsing.listing_p
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RealEstateBot/1.0"
 
 
@@ -65,54 +64,19 @@ class GenericApiSpider(Spider):
         params: dict[str, Any],
         json_body: dict[str, Any] | None,
     ) -> httpx.Response | None:
-        """One page request. Retries 429/5xx and network errors with backoff.
-
-        Returns the 200 response, or None for a non-retryable status or when retries ran out.
-        The last network error is re-raised so the caller can say what went wrong.
-        """
+        """One page request through the client pool (see ``HttpClientPool.request_with_retry``)."""
         assert self._clients is not None, "only called from crawl()"
-        retries = self.rate_cfg.retry_times
-
-        for attempt in range(1 + retries):
-            client = self._clients.next()  # moves to the next proxy when rotating
-            try:
-                async with self._semaphore:
-                    response = await client.request(
-                        method=method,
-                        url=url,
-                        headers=headers,
-                        params=params,
-                        json=json_body,
-                        timeout=self.rate_cfg.timeout_sec,
-                    )
-            except httpx.HTTPError as exc:  # network errors and timeouts
-                self._clients.record_failure(client)
-                logger.warning(
-                    "Attempt %d/%d network error for %s: %s", attempt + 1, retries + 1, url, exc
-                )
-                if attempt == retries:
-                    raise
-                await asyncio.sleep(self.retry_backoff_sec * (attempt + 1))
-                continue
-
-            if response.status_code == 200:
-                self._clients.record_success(client)
-                return response
-            if response.status_code in RETRYABLE_STATUSES:
-                self._clients.record_failure(client)
-                logger.warning(
-                    "Attempt %d/%d for %s received status %d. Backing off...",
-                    attempt + 1,
-                    retries + 1,
-                    url,
-                    response.status_code,
-                )
-                if attempt < retries:
-                    await asyncio.sleep(self.retry_backoff_sec * (attempt + 1))
-                continue
-            logger.error("HTTP error %d for URL: %s", response.status_code, url)
-            return None
-        return None
+        return await self._clients.request_with_retry(
+            method,
+            url,
+            retries=self.rate_cfg.retry_times,
+            backoff_sec=self.retry_backoff_sec,
+            semaphore=self._semaphore,
+            headers=headers,
+            params=params,
+            json=json_body,
+            timeout=self.rate_cfg.timeout_sec,
+        )
 
     async def crawl(
         self, run_mode: RunMode = RunMode.INCREMENTAL

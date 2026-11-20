@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from types import TracebackType
 from typing import Any
@@ -9,6 +11,10 @@ from typing import Any
 import httpx
 
 from real_estate_price_tracking_systems.domain.entities import ProxySettings
+
+logger = logging.getLogger(__name__)
+
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 class HttpClientPool:
@@ -100,3 +106,57 @@ class HttpClientPool:
         client = self._clients[self._index % total]
         self._index = (self._index + 1) % total
         return client
+
+    async def request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        retries: int,
+        backoff_sec: float,
+        semaphore: asyncio.Semaphore | None = None,
+        **request_kwargs: Any,
+    ) -> httpx.Response | None:
+        """One request, retried on 429/5xx and network errors with linear backoff.
+
+        Every attempt takes the next client, so with rotation a retry leaves the failing proxy,
+        and the outcome is recorded for the cooldown. Returns the 200 response, or None for a
+        non-retryable status or when the retries ran out; the last network error is re-raised so
+        the caller can say what went wrong. ``request_kwargs`` go to ``httpx.AsyncClient.request``.
+        """
+        for attempt in range(1 + retries):
+            client = self.next()
+            try:
+                if semaphore is None:
+                    response = await client.request(method, url, **request_kwargs)
+                else:
+                    async with semaphore:
+                        response = await client.request(method, url, **request_kwargs)
+            except httpx.HTTPError as exc:  # network errors and timeouts
+                self.record_failure(client)
+                logger.warning(
+                    "Attempt %d/%d network error for %s: %s", attempt + 1, retries + 1, url, exc
+                )
+                if attempt == retries:
+                    raise
+                await asyncio.sleep(backoff_sec * (attempt + 1))
+                continue
+
+            if response.status_code == 200:
+                self.record_success(client)
+                return response
+            if response.status_code in RETRYABLE_STATUSES:
+                self.record_failure(client)
+                logger.warning(
+                    "Attempt %d/%d for %s received status %d. Backing off...",
+                    attempt + 1,
+                    retries + 1,
+                    url,
+                    response.status_code,
+                )
+                if attempt < retries:
+                    await asyncio.sleep(backoff_sec * (attempt + 1))
+                continue
+            logger.error("HTTP error %d for URL: %s", response.status_code, url)
+            return None
+        return None
